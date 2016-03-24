@@ -59,6 +59,7 @@ namespace Microsoft.Extensions.DependencyInjection
             if (manager == null)
             {
                 manager = new ApplicationPartManager();
+                manager.FeatureProviders.Add(new ControllerFeatureProvider());
 
                 var environment = GetServiceFromCollection<IHostingEnvironment>(services);
                 if (environment == null)
@@ -126,7 +127,6 @@ namespace Microsoft.Extensions.DependencyInjection
             // These are consumed only when creating action descriptors, then they can be de-allocated
             services.TryAddTransient<IAssemblyProvider, DefaultAssemblyProvider>();
 
-            services.TryAddTransient<IControllerTypeProvider, DefaultControllerTypeProvider>();
             services.TryAddEnumerable(
                 ServiceDescriptor.Transient<IApplicationModelProvider, DefaultApplicationModelProvider>());
             services.TryAddEnumerable(

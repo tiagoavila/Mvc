@@ -45,7 +45,7 @@ namespace Microsoft.AspNetCore.Mvc.Internal
             // Set up ModelBinding
             options.ModelBinderProviders.Add(new BinderTypeModelBinderProvider());
             options.ModelBinderProviders.Add(new ServicesModelBinderProvider());
-            options.ModelBinderProviders.Add(new BodyModelBinderProvider(readerFactory));
+            options.ModelBinderProviders.Add(new BodyModelBinderProvider(_readerFactory));
             options.ModelBinderProviders.Add(new HeaderModelBinderProvider());
             options.ModelBinderProviders.Add(new SimpleTypeModelBinderProvider());
             options.ModelBinderProviders.Add(new CancellationTokenModelBinderProvider());

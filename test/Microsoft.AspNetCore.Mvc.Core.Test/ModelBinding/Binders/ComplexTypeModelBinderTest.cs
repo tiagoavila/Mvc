@@ -1067,7 +1067,8 @@ namespace Microsoft.AspNetCore.Mvc.ModelBinding.Binders
         private static TestableComplexTypeModelBinder CreateBinder(ModelMetadata metadata)
         {
             var options = new TestOptionsManager<MvcOptions>();
-            MvcCoreMvcOptionsSetup.ConfigureMvc(options.Value, new TestHttpRequestStreamReaderFactory());
+            var setup = new MvcCoreMvcOptionsSetup(new TestHttpRequestStreamReaderFactory());
+            setup.Configure(options.Value);
 
             var lastIndex = options.Value.ModelBinderProviders.Count - 1;
             Assert.IsType<ComplexTypeModelBinderProvider>(options.Value.ModelBinderProviders[lastIndex]);
