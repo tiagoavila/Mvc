@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using ControllersFromServicesClassLibrary;
+using ControllersFromServicesWebSite.Components;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -23,9 +24,14 @@ namespace ControllersFromServicesWebSite
                 .AddMvc()
                 .ConfigureApplicationPartManager(manager => manager.ApplicationParts.Clear())
                 .AddApplicationPart(typeof(TimeScheduleController).GetTypeInfo().Assembly)
-                .ConfigureApplicationPartManager(manager => manager.ApplicationParts.Add(new TypesPart(typeof(AnotherController))));
+                .ConfigureApplicationPartManager(manager => manager.ApplicationParts.Add(new TypesPart(
+                    typeof(AnotherController),
+                    typeof(ComponentFromServicesViewComponent))))
+                .AddControllersAsServices()
+                .AddViewComponentsAsServices();
 
             services.AddTransient<QueryValueService>();
+            services.AddTransient<ValueService>();
             services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
         }
 
