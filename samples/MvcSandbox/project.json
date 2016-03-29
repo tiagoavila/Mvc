@@ -32,6 +32,10 @@
       }
     }
   },
+  "content": [
+    "Views",
+    "wwwroot/dist"
+  ],
   "exclude": [
     "wwwroot",
     "node_modules",

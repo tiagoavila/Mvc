@@ -27,6 +27,11 @@ namespace MvcSandbox
                 routes.MapRoute(
                     name: "default",
                     template: "{controller=Home}/{action=Index}/{id?}");
+
+                routes.MapRoute("Wildcard Routing",
+                    "{*anything}",
+                    new { controller = "Home", action = "Index" },
+                    new { anything = @"^(.*)?$" });
             });
         }
 
