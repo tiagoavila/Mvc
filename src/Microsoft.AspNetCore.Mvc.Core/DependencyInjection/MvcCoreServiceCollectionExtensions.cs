@@ -67,10 +67,10 @@ namespace Microsoft.Extensions.DependencyInjection
                     return manager;
                 }
 
-                var assemblies = new DefaultAssemblyProvider(environment).CandidateAssemblies;
-                foreach (var assembly in assemblies)
+                var parts = DefaultAssemblyPartDiscoveryProvider.DiscoverAssemblyParts(environment.ApplicationName);
+                foreach (var part in parts)
                 {
-                    manager.ApplicationParts.Add(new AssemblyPart(assembly));
+                    manager.ApplicationParts.Add(part);
                 }
             }
 
@@ -125,7 +125,6 @@ namespace Microsoft.Extensions.DependencyInjection
             // Action Discovery
             //
             // These are consumed only when creating action descriptors, then they can be de-allocated
-            services.TryAddTransient<IAssemblyProvider, DefaultAssemblyProvider>();
 
             services.TryAddEnumerable(
                 ServiceDescriptor.Transient<IApplicationModelProvider, DefaultApplicationModelProvider>());
