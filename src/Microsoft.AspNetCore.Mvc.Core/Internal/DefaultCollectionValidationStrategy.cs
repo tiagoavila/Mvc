@@ -1,11 +1,14 @@
 // Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
+using System;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Reflection;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.AspNetCore.Mvc.ModelBinding.Validation;
+using System.Linq.Expressions;
 
 namespace Microsoft.AspNetCore.Mvc.Internal
 {
@@ -44,7 +47,8 @@ namespace Microsoft.AspNetCore.Mvc.Internal
         /// <summary>
         /// Gets an instance of <see cref="DefaultCollectionValidationStrategy"/>.
         /// </summary>
-        public static readonly IValidationStrategy Instance = new DefaultCollectionValidationStrategy();
+        public static readonly DefaultCollectionValidationStrategy Instance = new DefaultCollectionValidationStrategy();
+        private readonly ConcurrentDictionary<Type, Func<object, IEnumerator>> _genericGetEnumeratorCache = new ConcurrentDictionary<Type, Func<object, IEnumerator>>();
 
         private DefaultCollectionValidationStrategy()
         {
@@ -60,10 +64,22 @@ namespace Microsoft.AspNetCore.Mvc.Internal
             return new Enumerator(metadata.ElementMetadata, key, enumerator);
         }
 
-        public static IEnumerator GetEnumeratorForElementType(ModelMetadata metadata, object model)
+        public IEnumerator GetEnumeratorForElementType(ModelMetadata metadata, object model)
         {
-            var getEnumeratorMethod = _getEnumerator.MakeGenericMethod(metadata.ElementType);
-            return (IEnumerator)getEnumeratorMethod.Invoke(null, new object[] { model });
+            Func<object, IEnumerator> getEnumerator;
+            if (!_genericGetEnumeratorCache.TryGetValue(metadata.ElementType, out getEnumerator))
+            {
+                var getEnumeratorMethod = _getEnumerator.MakeGenericMethod(metadata.ElementType);
+                var parameter = Expression.Parameter(typeof(object), "model");
+                var expression =
+                    Expression.Lambda<Func<object, IEnumerator>>(
+                        Expression.Call(null, getEnumeratorMethod, parameter),
+                        parameter);
+                getEnumerator = expression.Compile();
+                _genericGetEnumeratorCache.TryAdd(metadata.ElementType, getEnumerator);
+            }
+
+            return getEnumerator(model);
         }
 
         // Called via reflection.
