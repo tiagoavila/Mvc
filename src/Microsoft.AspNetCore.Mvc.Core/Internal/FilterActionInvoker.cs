@@ -127,8 +127,7 @@ namespace Microsoft.AspNetCore.Mvc.Internal
 
             // If Authorization Filters return a result, it's a short circuit because
             // authorization failed. We don't execute Result Filters around the result.
-            Debug.Assert(_authorizationContext != null);
-            if (_authorizationContext.Result != null)
+            if (_authorizationContext?.Result != null)
             {
                 await InvokeResultAsync(_authorizationContext.Result);
                 return;
@@ -174,65 +173,63 @@ namespace Microsoft.AspNetCore.Mvc.Internal
         {
             _cursor.Reset();
 
-            _authorizationContext = new AuthorizationFilterContext(Context, _filters);
-            return InvokeAuthorizationFilterAsync();
+            return InvokeNextAuthorizationFilterAsync();
         }
 
-        private async Task InvokeAuthorizationFilterAsync()
+        private Task InvokeNextAuthorizationFilterAsync()
         {
             // We should never get here if we already have a result.
-            Debug.Assert(_authorizationContext != null);
-            Debug.Assert(_authorizationContext.Result == null);
+            Debug.Assert(_authorizationContext?.Result == null);
 
             var current = _cursor.GetNextFilter<IAuthorizationFilter, IAsyncAuthorizationFilter>();
             if (current.FilterAsync != null)
             {
-                _diagnosticSource.BeforeOnAuthorizationAsync(
-                    _authorizationContext,
-                    current.FilterAsync);
-
-                await current.FilterAsync.OnAuthorizationAsync(_authorizationContext);
-
-                _diagnosticSource.AfterOnAuthorizationAsync(
-                    _authorizationContext,
-                    current.FilterAsync);
-
-                if (_authorizationContext.Result == null)
-                {
-                    // Only keep going if we don't have a result
-                    await InvokeAuthorizationFilterAsync();
-                }
-                else
-                {
-                    Logger.AuthorizationFailure(current.FilterAsync);
-                }
+                _authorizationContext = _authorizationContext ?? new AuthorizationFilterContext(Context, _filters);
+                return InvokeAsyncAuthorizationFilterAsync(current.FilterAsync);
             }
             else if (current.Filter != null)
             {
-                _diagnosticSource.BeforeOnAuthorization(
-                    _authorizationContext,
-                    current.Filter);
-
-                current.Filter.OnAuthorization(_authorizationContext);
-
-                _diagnosticSource.AfterOnAuthorization(
-                    _authorizationContext,
-                    current.Filter);
-
-                if (_authorizationContext.Result == null)
-                {
-                    // Only keep going if we don't have a result
-                    await InvokeAuthorizationFilterAsync();
-                }
-                else
-                {
-                    Logger.AuthorizationFailure(current.Filter);
-                }
+                _authorizationContext = _authorizationContext ?? new AuthorizationFilterContext(Context, _filters);
+                return InvokeAsyncAuthorizationFilterAsync(current.FilterAsync);
             }
             else
             {
-                // We've run out of Authorization Filters - if we haven't short circuited by now then this
-                // request is authorized.
+                return TaskCache.CompletedTask;
+            }
+        }
+
+        private async Task InvokeSyncAuthorizationFilterAsync(IAuthorizationFilter filter)
+        {
+            _diagnosticSource.BeforeOnAuthorization(_authorizationContext, filter);
+            filter.OnAuthorization(_authorizationContext);
+            _diagnosticSource.AfterOnAuthorization(_authorizationContext, filter);
+
+            if (_authorizationContext.Result == null)
+            {
+                // Only keep going if we don't have a result
+                await InvokeNextAuthorizationFilterAsync();
+            }
+            else
+            {
+                Logger.AuthorizationFailure(filter);
+            }
+
+        }
+
+        private async Task InvokeAsyncAuthorizationFilterAsync(IAsyncAuthorizationFilter filter)
+        {
+            _diagnosticSource.BeforeOnAuthorizationAsync(_authorizationContext, filter);
+            await filter.OnAuthorizationAsync(_authorizationContext);
+            _diagnosticSource.AfterOnAuthorizationAsync(_authorizationContext, filter);
+
+            if (_authorizationContext.Result == null)
+            {
+                // Only keep going if we don't have a result
+                await InvokeNextAuthorizationFilterAsync();
+            }
+            else
+            {
+                Logger.AuthorizationFailure(filter);
             }
         }
 
@@ -244,7 +241,13 @@ namespace Microsoft.AspNetCore.Mvc.Internal
             return InvokeResourceFilterAsync();
         }
 
-        private async Task<ResourceExecutedContext> InvokeResourceFilterAsync()
+        private async Task<ResourceExecutedContext> InvokeResourceFilterAwaitedAsync()
+        {
+            await InvokeResourceFilterAsync();
+            return _resourceExecutedContext;
+        }
+
+        private async Task InvokeResourceFilterAsync()
         {
             Debug.Assert(_resourceExecutingContext != null);
 
@@ -271,7 +274,7 @@ namespace Microsoft.AspNetCore.Mvc.Internal
 
                     await item.FilterAsync.OnResourceExecutionAsync(
                         _resourceExecutingContext,
-                        InvokeResourceFilterAsync);
+                        InvokeResourceFilterAwaitedAsync);
 
                     _diagnosticSource.AfterOnResourceExecution(
                         _resourceExecutingContext.ActionDescriptor,
@@ -327,7 +330,8 @@ namespace Microsoft.AspNetCore.Mvc.Internal
                             _resourceExecutedContext,
                             item.Filter);
 
-                        item.Filter.OnResourceExecuted(await InvokeResourceFilterAsync());
+                        await InvokeResourceFilterAsync();
+                        item.Filter.OnResourceExecuted(_resourceExecutedContext);
 
                         _diagnosticSource.AfterOnResourceExecuted(
                             _resourceExecutingContext.ActionDescriptor,
@@ -393,7 +397,6 @@ namespace Microsoft.AspNetCore.Mvc.Internal
             }
 
             Debug.Assert(_resourceExecutedContext != null);
-            return _resourceExecutedContext;
         }
 
         private Task InvokeAllExceptionFiltersAsync()
@@ -505,7 +508,13 @@ namespace Microsoft.AspNetCore.Mvc.Internal
             await InvokeActionFilterAsync();
         }
 
-        private async Task<ActionExecutedContext> InvokeActionFilterAsync()
+        private async Task<ActionExecutedContext> InvokeActionFilterAwaitedAsync()
+        {
+            await InvokeActionFilterAsync();
+            return _actionExecutedContext;
+        }
+
+        private async Task InvokeActionFilterAsync()
         {
             Debug.Assert(_actionExecutingContext != null);
             if (_actionExecutingContext.Result != null)
@@ -529,7 +538,7 @@ namespace Microsoft.AspNetCore.Mvc.Internal
                         _actionExecutingContext,
                         item.FilterAsync);
 
-                    await item.FilterAsync.OnActionExecutionAsync(_actionExecutingContext, InvokeActionFilterAsync);
+                    await item.FilterAsync.OnActionExecutionAsync(_actionExecutingContext, InvokeActionFilterAwaitedAsync);
 
                     _diagnosticSource.AfterOnActionExecution(
                         _actionExecutingContext.ActionDescriptor,
@@ -584,7 +593,8 @@ namespace Microsoft.AspNetCore.Mvc.Internal
                             _actionExecutedContext,
                             item.Filter);
 
-                        item.Filter.OnActionExecuted(await InvokeActionFilterAsync());
+                        await InvokeActionFilterAsync();
+                        item.Filter.OnActionExecuted(_actionExecutedContext);
 
                         _diagnosticSource.BeforeOnActionExecuted(
                             _actionExecutingContext.ActionDescriptor,
@@ -635,7 +645,6 @@ namespace Microsoft.AspNetCore.Mvc.Internal
                     ExceptionDispatchInfo = ExceptionDispatchInfo.Capture(exception)
                 };
             }
-            return _actionExecutedContext;
         }
 
         private async Task InvokeAllResultFiltersAsync(IActionResult result)
@@ -660,7 +669,7 @@ namespace Microsoft.AspNetCore.Mvc.Internal
             }
         }
 
-        private async Task<ResultExecutedContext> InvokeResultFilterAsync()
+        private async Task<ResultExecutedContext> InvokeResultFilterAwaitedAsync()
         {
             Debug.Assert(_resultExecutingContext != null);
             if (_resultExecutingContext.Cancel == true)
@@ -676,6 +685,14 @@ namespace Microsoft.AspNetCore.Mvc.Internal
                 throw new InvalidOperationException(message);
             }
 
+            await InvokeResultFilterAsync();
+            return _resultExecutedContext;
+        }
+
+        private async Task InvokeResultFilterAsync()
+        {
+            Debug.Assert(_resultExecutingContext != null);
+
             try
             {
                 var item = _cursor.GetNextFilter<IResultFilter, IAsyncResultFilter>();
@@ -685,7 +702,7 @@ namespace Microsoft.AspNetCore.Mvc.Internal
                         _resultExecutingContext,
                         item.FilterAsync);
 
-                    await item.FilterAsync.OnResultExecutionAsync(_resultExecutingContext, InvokeResultFilterAsync);
+                    await item.FilterAsync.OnResultExecutionAsync(_resultExecutingContext, InvokeResultFilterAwaitedAsync);
 
                     _diagnosticSource.AfterOnResultExecution(
                         _resultExecutingContext.ActionDescriptor,
@@ -740,7 +757,8 @@ namespace Microsoft.AspNetCore.Mvc.Internal
                             _resultExecutedContext,
                             item.Filter);
 
-                        item.Filter.OnResultExecuted(await InvokeResultFilterAsync());
+                        await InvokeResultFilterAsync();
+                        item.Filter.OnResultExecuted(_resultExecutedContext);
 
                         _diagnosticSource.AfterOnResultExecuted(
                             _resultExecutingContext.ActionDescriptor,
@@ -779,8 +797,6 @@ namespace Microsoft.AspNetCore.Mvc.Internal
                     ExceptionDispatchInfo = ExceptionDispatchInfo.Capture(exception)
                 };
             }
-
-            return _resultExecutedContext;
         }
 
         private async Task InvokeResultAsync(IActionResult result)
