@@ -41,6 +41,8 @@ namespace Microsoft.AspNetCore.Mvc.Internal
         private ResultExecutingContext _resultExecutingContext;
         private ResultExecutedContext _resultExecutedContext;
 
+        private IActionResult _result;
+
         public FilterActionInvoker(
             ActionContext actionContext,
             ControllerActionInvokerCache controllerActionInvokerCache,
@@ -190,7 +192,7 @@ namespace Microsoft.AspNetCore.Mvc.Internal
             else if (current.Filter != null)
             {
                 _authorizationContext = _authorizationContext ?? new AuthorizationFilterContext(Context, _filters);
-                return InvokeAsyncAuthorizationFilterAsync(current.FilterAsync);
+                return InvokeSyncAuthorizationFilterAsync(current.Filter);
             }
             else
             {
@@ -361,7 +363,7 @@ namespace Microsoft.AspNetCore.Mvc.Internal
                     else if (_exceptionContext.Exception != null)
                     {
                         // If we get here, this means that we have an unhandled exception.
-                        // Exception filted didn't handle this, so send it on to resource filters.
+                        // Exception filters didn't handle this, so send it on to resource filters.
                         _resourceExecutedContext = new ResourceExecutedContext(_resourceExecutingContext, _filters);
 
                         // Preserve the stack trace if possible.
@@ -376,15 +378,33 @@ namespace Microsoft.AspNetCore.Mvc.Internal
                         // We have a successful 'result' from the action or an Action Filter, so run
                         // Result Filters.
                         Debug.Assert(_actionExecutedContext != null);
-                        var result = _actionExecutedContext.Result;
+                        _result = _actionExecutedContext.Result;
 
                         // >> ResultFilters >> (Result)
-                        await InvokeAllResultFiltersAsync(result);
+                        _cursor.Reset();
+                        await InvokeNextResultFilterAsync();
 
-                        _resourceExecutedContext = new ResourceExecutedContext(_resourceExecutingContext, _filters)
+                        if (_resultExecutedContext?.Exception != null &&
+                            _resultExecutedContext?.ExceptionHandled != true)
                         {
-                            Result = _resultExecutedContext.Result,
-                        };
+                            // If we get here, this means that we have an unhandled exception.
+                            // Result filters didn't handle this, so send it on to resource filters.
+                            _resourceExecutedContext = new ResourceExecutedContext(_resourceExecutingContext, _filters);
+
+                            // Preserve the stack trace if possible.
+                            _resourceExecutedContext.Exception = _resultExecutedContext.Exception;
+                            if (_resultExecutedContext.ExceptionDispatchInfo != null)
+                            {
+                                _resourceExecutedContext.ExceptionDispatchInfo = _resultExecutedContext.ExceptionDispatchInfo;
+                            }
+                        }
+                        else
+                        {
+                            _resourceExecutedContext = new ResourceExecutedContext(_resourceExecutingContext, _filters)
+                            {
+                                Result = _resultExecutedContext?.Result ?? _result,
+                            };
+                        }
                     }
                 }
             }
@@ -647,29 +667,39 @@ namespace Microsoft.AspNetCore.Mvc.Internal
             }
         }
 
-        private async Task InvokeAllResultFiltersAsync(IActionResult result)
+        private Task InvokeNextResultFilterAsync()
         {
-            _cursor.Reset();
-
-            _resultExecutingContext = new ResultExecutingContext(Context, _filters, result, Instance);
-            await InvokeResultFilterAsync();
-
-            Debug.Assert(_resultExecutingContext != null);
-            if (_resultExecutedContext.Exception != null && !_resultExecutedContext.ExceptionHandled)
+            var current = _cursor.GetNextFilter<IResultFilter, IAsyncResultFilter>();
+            if (current.FilterAsync != null)
             {
-                // There's an unhandled exception in filters
-                if (_resultExecutedContext.ExceptionDispatchInfo != null)
+                _resultExecutingContext = _resultExecutingContext ?? new ResultExecutingContext(Context, _filters, _result, Instance);
+                return InvokeAsyncResultFilterAsync(current.FilterAsync);
+            }
+            else if (current.Filter != null)
+            {
+                _resultExecutingContext = _resultExecutingContext ?? new ResultExecutingContext(Context, _filters, _result, Instance);
+                return InvokeSyncResultFilterAsync(current.Filter);
+            }
+            else if (_resultExecutingContext != null)
+            {
+                // The empty result is always flowed back as the 'executed' result
+                if (_resultExecutingContext.Result == null)
                 {
-                    _resultExecutedContext.ExceptionDispatchInfo.Throw();
+                    _resultExecutingContext.Result = new EmptyResult();
                 }
-                else
-                {
-                    throw _resultExecutedContext.Exception;
-                }
+
+                return InvokeResultInFilterAsync(_resultExecutingContext.Result);
+            }
+            else
+            {
+                // The empty result is always flowed back as the 'executed' result
+                _result = _result ?? new EmptyResult();
+
+                return InvokeResultAsync(_result);
             }
         }
 
-        private async Task<ResultExecutedContext> InvokeResultFilterAwaitedAsync()
+        private async Task<ResultExecutedContext> InvokeNextResultFilterAwaitedAsync()
         {
             Debug.Assert(_resultExecutingContext != null);
             if (_resultExecutingContext.Cancel == true)
@@ -685,105 +715,51 @@ namespace Microsoft.AspNetCore.Mvc.Internal
                 throw new InvalidOperationException(message);
             }
 
-            await InvokeResultFilterAsync();
+            await InvokeNextResultFilterAsync();
+
+            Debug.Assert(_resultExecutedContext != null);
             return _resultExecutedContext;
         }
 
-        private async Task InvokeResultFilterAsync()
+        private async Task InvokeSyncResultFilterAsync(IResultFilter filter)
         {
             Debug.Assert(_resultExecutingContext != null);
 
             try
             {
-                var item = _cursor.GetNextFilter<IResultFilter, IAsyncResultFilter>();
-                if (item.FilterAsync != null)
+                _diagnosticSource.BeforeOnResultExecuting(_resultExecutingContext, filter);
+                filter.OnResultExecuting(_resultExecutingContext);
+                _diagnosticSource.AfterOnResultExecuting(_resultExecutingContext, filter);
+
+                if (_resultExecutingContext.Cancel == true)
                 {
-                    _diagnosticSource.BeforeOnResultExecution(
-                        _resultExecutingContext,
-                        item.FilterAsync);
+                    // Short-circuited by setting Cancel == true
+                    Logger.ResourceFilterShortCircuited(filter);
 
-                    await item.FilterAsync.OnResultExecutionAsync(_resultExecutingContext, InvokeResultFilterAwaitedAsync);
-
-                    _diagnosticSource.AfterOnResultExecution(
-                        _resultExecutingContext.ActionDescriptor,
-                        _resultExecutedContext,
-                        item.FilterAsync);
-
-                    if (_resultExecutedContext == null || _resultExecutingContext.Cancel == true)
-                    {
-                        // Short-circuited by not calling next || Short-circuited by setting Cancel == true
-                        Logger.ResourceFilterShortCircuited(item.FilterAsync);
-
-                        _resultExecutedContext = new ResultExecutedContext(
-                            _resultExecutingContext,
-                            _filters,
-                            _resultExecutingContext.Result,
-                            Instance)
-                        {
-                            Canceled = true,
-                        };
-                    }
-                }
-                else if (item.Filter != null)
-                {
-                    _diagnosticSource.BeforeOnResultExecuting(
-                        _resultExecutingContext,
-                        item.Filter);
-
-                    item.Filter.OnResultExecuting(_resultExecutingContext);
-
-                    _diagnosticSource.AfterOnResultExecuting(
-                        _resultExecutingContext,
-                        item.Filter);
-
-                    if (_resultExecutingContext.Cancel == true)
-                    {
-                        // Short-circuited by setting Cancel == true
-                        Logger.ResourceFilterShortCircuited(item.Filter);
-
-                        _resultExecutedContext = new ResultExecutedContext(
-                            _resultExecutingContext,
-                            _filters,
-                            _resultExecutingContext.Result,
-                            Instance)
-                        {
-                            Canceled = true,
-                        };
-                    }
-                    else
-                    {
-                        _diagnosticSource.BeforeOnResultExecuted(
-                            _resultExecutingContext.ActionDescriptor,
-                            _resultExecutedContext,
-                            item.Filter);
-
-                        await InvokeResultFilterAsync();
-                        item.Filter.OnResultExecuted(_resultExecutedContext);
-
-                        _diagnosticSource.AfterOnResultExecuted(
-                            _resultExecutingContext.ActionDescriptor,
-                            _resultExecutedContext,
-                            item.Filter);
-                    }
-                }
-                else
-                {
-                    _cursor.Reset();
-
-                    // The empty result is always flowed back as the 'executed' result
-                    if (_resultExecutingContext.Result == null)
-                    {
-                        _resultExecutingContext.Result = new EmptyResult();
-                    }
-
-                    await InvokeResultAsync(_resultExecutingContext.Result);
-
-                    Debug.Assert(_resultExecutedContext == null);
                     _resultExecutedContext = new ResultExecutedContext(
                         _resultExecutingContext,
                         _filters,
                         _resultExecutingContext.Result,
-                        Instance);
+                        Instance)
+                    {
+                        Canceled = true,
+                    };
+                }
+                else
+                {
+                    await InvokeNextResultFilterAsync();
+
+                    _diagnosticSource.BeforeOnResultExecuted(
+                        _resultExecutingContext.ActionDescriptor,
+                        _resultExecutedContext,
+                        filter);
+
+                    filter.OnResultExecuted(_resultExecutedContext);
+
+                    _diagnosticSource.AfterOnResultExecuted(
+                        _resultExecutingContext.ActionDescriptor,
+                        _resultExecutedContext,
+                        filter);
                 }
             }
             catch (Exception exception)
@@ -793,6 +769,89 @@ namespace Microsoft.AspNetCore.Mvc.Internal
                     _filters,
                     _resultExecutingContext.Result,
                     Instance)
+                {
+                    ExceptionDispatchInfo = ExceptionDispatchInfo.Capture(exception)
+                };
+            }
+        }
+
+        private async Task InvokeAsyncResultFilterAsync(IAsyncResultFilter filter)
+        {
+            Debug.Assert(_resultExecutingContext != null);
+
+            try
+            {
+                _diagnosticSource.BeforeOnResultExecution(
+                _resultExecutingContext,
+                filter);
+
+                await filter.OnResultExecutionAsync(_resultExecutingContext, InvokeNextResultFilterAwaitedAsync);
+
+                _diagnosticSource.AfterOnResultExecution(
+                    _resultExecutingContext.ActionDescriptor,
+                    _resultExecutedContext,
+                    filter);
+
+                if (_resultExecutedContext == null || _resultExecutingContext.Cancel == true)
+                {
+                    // Short-circuited by not calling next || Short-circuited by setting Cancel == true
+                    Logger.ResourceFilterShortCircuited(filter);
+
+                    _resultExecutedContext = new ResultExecutedContext(
+                        _resultExecutingContext,
+                        _filters,
+                        _resultExecutingContext.Result,
+                        Instance)
+                    {
+                        Canceled = true,
+                    };
+                }
+            }
+            catch (Exception exception)
+            {
+                _resultExecutedContext = new ResultExecutedContext(
+                    _resultExecutingContext,
+                    _filters,
+                    _resultExecutingContext.Result,
+                    Instance)
+                {
+                    ExceptionDispatchInfo = ExceptionDispatchInfo.Capture(exception)
+                };
+            }
+        }
+
+        private async Task InvokeResultInFilterAsync(IActionResult result)
+        {
+            // Should only be invoked if we had a result filter
+            Debug.Assert(_resultExecutingContext != null);
+
+            try
+            {
+                _diagnosticSource.BeforeActionResult(Context, result);
+
+                try
+                {
+                    await result.ExecuteResultAsync(Context);
+                }
+                finally
+                {
+                    _diagnosticSource.AfterActionResult(Context, result);
+                }
+
+                Debug.Assert(_resultExecutedContext == null);
+                _resultExecutedContext = new ResultExecutedContext(
+                    _resultExecutingContext,
+                    _filters,
+                    _resultExecutingContext.Result,
+                    Instance);
+            }
+            catch (Exception exception)
+            {
+                _resultExecutedContext = new ResultExecutedContext(
+                   _resultExecutingContext,
+                   _filters,
+                   _resultExecutingContext.Result,
+                   Instance)
                 {
                     ExceptionDispatchInfo = ExceptionDispatchInfo.Capture(exception)
                 };
@@ -859,32 +918,39 @@ namespace Microsoft.AspNetCore.Mvc.Internal
                 where TFilter : class
                 where TFilterAsync : class
             {
-                while (_index < _filters.Length)
+                // Perf: Be really careful with changes here - this method is SUPER hot. We're very careful
+                // here to avoid repeated access of _index, and do things in the order that's most likely
+                // to no-op.
+
+                var index = _index;
+                var length = _filters.Length;
+
+                while (index < length)
                 {
-                    var filter = _filters[_index] as TFilter;
-                    var filterAsync = _filters[_index] as TFilterAsync;
+                    var filter = _filters[index++];
 
-                    _index += 1;
+                    var filterAsync = filter as TFilterAsync;
+                    TFilter filterSync = null;
 
-                    if (filter != null || filterAsync != null)
+                    if (filterAsync != null || (filterSync = filter as TFilter) != null)
                     {
-                        return new FilterCursorItem<TFilter, TFilterAsync>(_index, filter, filterAsync);
+                        _index = index;
+                        return new FilterCursorItem<TFilter, TFilterAsync>(filterSync, filterAsync);
                     }
                 }
 
+                _index = index;
                 return default(FilterCursorItem<TFilter, TFilterAsync>);
             }
         }
 
         private struct FilterCursorItem<TFilter, TFilterAsync>
         {
-            public readonly int Index;
             public readonly TFilter Filter;
             public readonly TFilterAsync FilterAsync;
 
-            public FilterCursorItem(int index, TFilter filter, TFilterAsync filterAsync)
+            public FilterCursorItem(TFilter filter, TFilterAsync filterAsync)
             {
-                Index = index;
                 Filter = filter;
                 FilterAsync = filterAsync;
             }
